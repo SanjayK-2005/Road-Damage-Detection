@@ -5,6 +5,8 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 from PIL import Image
+import json
+import base64
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -18,7 +20,7 @@ app.static_folder = 'uploads'
 app.static_url_path = '/uploads'
 
 # Load your trained YOLOv8 model
-model = YOLO('best .pt')  # Replace with your model path
+model = YOLO('best.pt')  # Replace with your model path
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'mp4', 'avi'}
 
@@ -50,10 +52,9 @@ def process_image(image_path):
         cv2.putText(img, label, (int(x1), int(y1) - 10), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
     
-    output_path = os.path.join(app.config['UPLOAD_FOLDER'], 'processed_' + os.path.basename(image_path))
-    cv2.imwrite(output_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-    
-    return output_path
+    _, buffer = cv2.imencode('.jpg', cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+    base64_image = base64.b64encode(buffer).decode('utf-8')
+    return base64_image
 
 def process_video(video_path):
     # Open the video file
@@ -69,6 +70,7 @@ def process_video(video_path):
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
     
+    frames = []
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -94,12 +96,58 @@ def process_video(video_path):
         
         # Write the frame to output video
         out.write(frame)
+        
+        _, buffer = cv2.imencode('.jpg', frame)
+        frames.append(base64.b64encode(buffer).decode('utf-8'))
     
     # Release resources
     cap.release()
     out.release()
     
-    return output_path
+    return frames
+
+def get_model_metrics():
+    """Get model performance metrics"""
+    try:
+        # Run validation
+        results = model.val(
+            data='data.yaml',
+            conf=0.25,
+            iou=0.45,
+            verbose=False,
+            save_json=True,
+            save_hybrid=True,
+            plots=True
+        )
+        
+        metrics = {
+            'precision': float(results.box.precision),
+            'recall': float(results.box.recall),
+            'mAP50': float(results.box.map50),
+            'mAP50-95': float(results.box.map),
+            'f1-score': float(results.box.f1),
+            'class_names': results.names,
+            'per_class_precision': results.box.precision.tolist(),
+            'per_class_recall': results.box.recall.tolist(),
+            'per_class_map50': results.box.map50.tolist(),
+            'per_class_map': results.box.map.tolist()
+        }
+        
+        # Save metrics to JSON file
+        with open('model_metrics.json', 'w') as f:
+            json.dump(metrics, f, indent=4)
+            
+        return metrics
+    except Exception as e:
+        print(f"Error calculating metrics: {str(e)}")
+        return None
+
+@app.route('/metrics')
+def show_metrics():
+    metrics = get_model_metrics()
+    if metrics:
+        return render_template('metrics.html', metrics=metrics)
+    return jsonify({'error': 'Failed to calculate metrics'}), 500
 
 @app.route('/')
 def index():
@@ -122,19 +170,19 @@ def upload_file():
         try:
             # Process the file based on its type
             if filename.lower().endswith(('.mp4', '.avi')):
-                output_path = process_video(file_path)
+                frames = process_video(file_path)
+                return jsonify({
+                    'success': True,
+                    'frames': frames,
+                    'message': 'Video processed successfully'
+                })
             else:
-                output_path = process_image(file_path)
-            
-            # Get the relative URL for the processed file
-            output_filename = os.path.basename(output_path)
-            output_url = url_for('static', filename=output_filename)
-            
-            return jsonify({
-                'success': True,
-                'output_path': output_url,
-                'message': 'File processed successfully'
-            })
+                base64_image = process_image(file_path)
+                return jsonify({
+                    'success': True,
+                    'image': base64_image,
+                    'message': 'Image processed successfully'
+                })
             
         except Exception as e:
             return jsonify({'error': str(e)}), 500
@@ -142,4 +190,4 @@ def upload_file():
     return jsonify({'error': 'Invalid file type'}), 400
 
 if __name__ == '__main__':
-    app.run(debug=True) 
+    app.run(debug=True)
